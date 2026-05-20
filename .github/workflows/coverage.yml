@@ -2,7 +2,7 @@ name: Coverage
 
 on:
   push:
-    branches: [master]
+    branches: [main]
 
 permissions: { contents: read }
 
@@ -22,16 +22,18 @@ jobs:
         options: --entrypoint redis-server
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1.9.0
+        uses: actions-rust-lang/setup-rust-toolchain@2b1f5e9b395427c92ee4e3331786ca3c37afe2d7 # v1.16.0
         with:
           toolchain: nightly
           components: llvm-tools-preview
 
       - name: Install just, cargo-llvm-cov, cargo-nextest
-        uses: taiki-e/install-action@v2.42.14
+        uses: taiki-e/install-action@1329c298aa20c3257846c9b2e0e55967df3e3c37 # v2.75.25
         with:
           tool: just,cargo-llvm-cov,cargo-nextest
 
@@ -39,7 +41,7 @@ jobs:
         run: just test-coverage-codecov
 
       - name: Upload to Codecov
-        uses: codecov/codecov-action@v4.5.0
+        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
         with:
           files: codecov.json
           fail_ci_if_error: true

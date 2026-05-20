@@ -45,6 +45,7 @@ pub struct AggregatedMessageStream {
     max_size: usize,
     continuations: Vec<Bytes>,
     continuation_kind: ContinuationKind,
+    overflowed: bool,
 }
 
 impl AggregatedMessageStream {
@@ -56,6 +57,7 @@ impl AggregatedMessageStream {
             max_size: 1024 * 1024,
             continuations: Vec::new(),
             continuation_kind: ContinuationKind::Binary,
+            overflowed: false,
         }
     }
 
@@ -110,107 +112,376 @@ impl Stream for AggregatedMessageStream {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
 
-        let Some(msg) = ready!(Pin::new(&mut this.stream).poll_next(cx)?) else {
-            return Poll::Ready(None);
-        };
+        loop {
+            let Some(msg) = ready!(Pin::new(&mut this.stream).poll_next(cx)?) else {
+                return Poll::Ready(None);
+            };
 
-        match msg {
-            Message::Continuation(item) => match item {
-                Item::FirstText(bytes) => {
-                    this.continuation_kind = ContinuationKind::Text;
-                    this.current_size += bytes.len();
+            match msg {
+                Message::Continuation(item) => match item {
+                    Item::FirstText(bytes) => {
+                        if this.overflowed {
+                            continue;
+                        }
 
-                    if this.current_size > this.max_size {
-                        this.continuations.clear();
-                        return size_error();
+                        this.continuation_kind = ContinuationKind::Text;
+                        this.current_size += bytes.len();
+
+                        if this.current_size > this.max_size {
+                            this.current_size = 0;
+                            this.continuations.clear();
+                            this.overflowed = true;
+                            return size_error();
+                        }
+
+                        // Avoid unbounded growth when receiving unlimited empty continuation frames.
+                        if !bytes.is_empty() {
+                            this.continuations.push(bytes);
+                        }
+
+                        continue;
                     }
 
-                    this.continuations.push(bytes);
+                    Item::FirstBinary(bytes) => {
+                        if this.overflowed {
+                            continue;
+                        }
 
-                    Poll::Pending
-                }
+                        this.continuation_kind = ContinuationKind::Binary;
+                        this.current_size += bytes.len();
 
-                Item::FirstBinary(bytes) => {
-                    this.continuation_kind = ContinuationKind::Binary;
-                    this.current_size += bytes.len();
+                        if this.current_size > this.max_size {
+                            this.current_size = 0;
+                            this.continuations.clear();
+                            this.overflowed = true;
+                            return size_error();
+                        }
 
-                    if this.current_size > this.max_size {
-                        this.continuations.clear();
-                        return size_error();
+                        // Avoid unbounded growth when receiving unlimited empty continuation frames.
+                        if !bytes.is_empty() {
+                            this.continuations.push(bytes);
+                        }
+
+                        continue;
                     }
 
-                    this.continuations.push(bytes);
+                    Item::Continue(bytes) => {
+                        if this.overflowed {
+                            continue;
+                        }
 
-                    Poll::Pending
-                }
+                        this.current_size += bytes.len();
 
-                Item::Continue(bytes) => {
-                    this.current_size += bytes.len();
+                        if this.current_size > this.max_size {
+                            this.current_size = 0;
+                            this.continuations.clear();
+                            this.overflowed = true;
+                            return size_error();
+                        }
 
-                    if this.current_size > this.max_size {
-                        this.continuations.clear();
-                        return size_error();
+                        // Avoid unbounded growth when receiving unlimited empty continuation frames.
+                        if !bytes.is_empty() {
+                            this.continuations.push(bytes);
+                        }
+
+                        continue;
                     }
 
-                    this.continuations.push(bytes);
+                    Item::Last(bytes) => {
+                        if this.overflowed {
+                            this.current_size = 0;
+                            this.continuations.clear();
+                            this.overflowed = false;
+                            continue;
+                        }
 
-                    Poll::Pending
-                }
+                        this.current_size += bytes.len();
 
-                Item::Last(bytes) => {
-                    this.current_size += bytes.len();
+                        if this.current_size > this.max_size {
+                            // reset current_size, as this is the last message for
+                            // the current continuation
+                            this.current_size = 0;
+                            this.continuations.clear();
 
-                    if this.current_size > this.max_size {
-                        // reset current_size, as this is the last message for
-                        // the current continuation
+                            return size_error();
+                        }
+
+                        // Avoid unbounded growth when receiving unlimited empty continuation frames.
+                        if !bytes.is_empty() {
+                            this.continuations.push(bytes);
+                        }
+                        let bytes = collect(&mut this.continuations, this.current_size);
+
                         this.current_size = 0;
-                        this.continuations.clear();
 
-                        return size_error();
-                    }
-
-                    this.continuations.push(bytes);
-                    let bytes = collect(&mut this.continuations);
-
-                    this.current_size = 0;
-
-                    match this.continuation_kind {
-                        ContinuationKind::Text => {
-                            Poll::Ready(Some(match ByteString::try_from(bytes) {
-                                Ok(bytestring) => Ok(AggregatedMessage::Text(bytestring)),
-                                Err(err) => Err(ProtocolError::Io(io::Error::new(
-                                    io::ErrorKind::InvalidData,
-                                    err.to_string(),
-                                ))),
-                            }))
-                        }
-                        ContinuationKind::Binary => {
-                            Poll::Ready(Some(Ok(AggregatedMessage::Binary(bytes))))
+                        match this.continuation_kind {
+                            ContinuationKind::Text => {
+                                return Poll::Ready(Some(match ByteString::try_from(bytes) {
+                                    Ok(bytestring) => Ok(AggregatedMessage::Text(bytestring)),
+                                    Err(err) => Err(ProtocolError::Io(io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        err.to_string(),
+                                    ))),
+                                }))
+                            }
+                            ContinuationKind::Binary => {
+                                return Poll::Ready(Some(Ok(AggregatedMessage::Binary(bytes))))
+                            }
                         }
                     }
+                },
+
+                Message::Text(text) => return Poll::Ready(Some(Ok(AggregatedMessage::Text(text)))),
+                Message::Binary(binary) => {
+                    return Poll::Ready(Some(Ok(AggregatedMessage::Binary(binary))))
                 }
-            },
+                Message::Ping(ping) => return Poll::Ready(Some(Ok(AggregatedMessage::Ping(ping)))),
+                Message::Pong(pong) => return Poll::Ready(Some(Ok(AggregatedMessage::Pong(pong)))),
+                Message::Close(close) => {
+                    return Poll::Ready(Some(Ok(AggregatedMessage::Close(close))))
+                }
 
-            Message::Text(text) => Poll::Ready(Some(Ok(AggregatedMessage::Text(text)))),
-            Message::Binary(binary) => Poll::Ready(Some(Ok(AggregatedMessage::Binary(binary)))),
-            Message::Ping(ping) => Poll::Ready(Some(Ok(AggregatedMessage::Ping(ping)))),
-            Message::Pong(pong) => Poll::Ready(Some(Ok(AggregatedMessage::Pong(pong)))),
-            Message::Close(close) => Poll::Ready(Some(Ok(AggregatedMessage::Close(close)))),
-
-            Message::Nop => unreachable!("MessageStream should not produce no-ops"),
+                Message::Nop => unreachable!("MessageStream should not produce no-ops"),
+            }
         }
     }
 }
 
-fn collect(continuations: &mut Vec<Bytes>) -> Bytes {
+fn collect(continuations: &mut Vec<Bytes>, total_len: usize) -> Bytes {
     let continuations = mem::take(continuations);
-    let total_len = continuations.iter().map(|b| b.len()).sum();
-
     let mut buf = BytesMut::with_capacity(total_len);
 
     for chunk in continuations {
-        buf.extend(chunk);
+        buf.extend_from_slice(&chunk);
     }
 
     buf.freeze()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{future::Future, task::Poll};
+
+    use futures_core::Stream;
+
+    use super::{AggregatedMessage, Bytes, Item, Message, MessageStream};
+    use crate::stream::tests::payload_pair;
+
+    #[tokio::test]
+    async fn aggregates_continuations() {
+        std::future::poll_fn(move |cx| {
+            let (mut tx, rx) = payload_pair(8);
+            let message_stream = MessageStream::new(rx).aggregate_continuations();
+            let mut stream = std::pin::pin!(message_stream);
+
+            let messages = [
+                Message::Continuation(Item::FirstText(Bytes::from(b"first".to_vec()))),
+                Message::Continuation(Item::Continue(Bytes::from(b"second".to_vec()))),
+                Message::Continuation(Item::Last(Bytes::from(b"third".to_vec()))),
+            ];
+
+            let len = messages.len();
+
+            for (idx, msg) in messages.into_iter().enumerate() {
+                let poll = stream.as_mut().poll_next(cx);
+                assert!(
+                    poll.is_pending(),
+                    "Stream should be pending when no messages are present {poll:?}"
+                );
+
+                let fut = tx.send(msg);
+                let fut = std::pin::pin!(fut);
+
+                assert!(fut.poll(cx).is_ready(), "Sending should not yield");
+
+                if idx == len - 1 {
+                    assert!(
+                        stream.as_mut().poll_next(cx).is_ready(),
+                        "Stream should be ready"
+                    );
+                } else {
+                    assert!(
+                        stream.as_mut().poll_next(cx).is_pending(),
+                        "Stream shouldn't be ready until continuations complete"
+                    );
+                }
+            }
+
+            assert!(
+                stream.as_mut().poll_next(cx).is_pending(),
+                "Stream should be pending after processing messages"
+            );
+
+            Poll::Ready(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn aggregates_consecutive_continuations() {
+        std::future::poll_fn(move |cx| {
+            let (mut tx, rx) = payload_pair(8);
+            let message_stream = MessageStream::new(rx).aggregate_continuations();
+            let mut stream = std::pin::pin!(message_stream);
+
+            let messages = vec![
+                Message::Continuation(Item::FirstText(Bytes::from(b"first".to_vec()))),
+                Message::Continuation(Item::Continue(Bytes::from(b"second".to_vec()))),
+                Message::Continuation(Item::Last(Bytes::from(b"third".to_vec()))),
+            ];
+
+            let poll = stream.as_mut().poll_next(cx);
+            assert!(
+                poll.is_pending(),
+                "Stream should be pending when no messages are present {poll:?}"
+            );
+
+            let fut = tx.send_many(messages);
+            let fut = std::pin::pin!(fut);
+
+            assert!(fut.poll(cx).is_ready(), "Sending should not yield");
+
+            assert!(
+                stream.as_mut().poll_next(cx).is_ready(),
+                "Stream should be ready when all continuations have been sent"
+            );
+
+            assert!(
+                stream.as_mut().poll_next(cx).is_pending(),
+                "Stream should be pending after processing messages"
+            );
+
+            Poll::Ready(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn ignores_empty_continuation_chunks() {
+        std::future::poll_fn(move |cx| {
+            let (mut tx, rx) = payload_pair(8);
+            let message_stream = MessageStream::new(rx).aggregate_continuations();
+            let mut stream = std::pin::pin!(message_stream);
+
+            let poll = stream.as_mut().poll_next(cx);
+            assert!(
+                poll.is_pending(),
+                "Stream should be pending when no messages are present {poll:?}"
+            );
+
+            // start continuation with empty chunk, then send a bunch of empty continuation chunks;
+            // they should not be buffered (would otherwise cause unbounded `Vec` growth).
+            let messages = std::iter::once(Message::Continuation(Item::FirstText(Bytes::new())))
+                .chain((0..128).map(|_| Message::Continuation(Item::Continue(Bytes::new()))))
+                .collect::<Vec<_>>();
+
+            {
+                let fut = tx.send_many(messages);
+                let fut = std::pin::pin!(fut);
+                assert!(fut.poll(cx).is_ready(), "Sending should not yield");
+            }
+
+            assert!(
+                stream.as_mut().poll_next(cx).is_pending(),
+                "Stream shouldn't be ready until continuations complete"
+            );
+            assert_eq!(stream.as_mut().get_mut().continuations.len(), 0);
+
+            // end continuation; this should yield an empty text message.
+            {
+                let fut = tx.send(Message::Continuation(Item::Last(Bytes::new())));
+                let fut = std::pin::pin!(fut);
+                assert!(fut.poll(cx).is_ready(), "Sending should not yield");
+            }
+
+            match stream.as_mut().poll_next(cx) {
+                Poll::Ready(Some(Ok(AggregatedMessage::Text(text)))) => assert!(text.is_empty()),
+                poll => panic!("expected empty text message; got {poll:?}"),
+            }
+
+            assert_eq!(stream.as_mut().get_mut().continuations.len(), 0);
+
+            Poll::Ready(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn stream_closes() {
+        std::future::poll_fn(move |cx| {
+            let (tx, rx) = payload_pair(8);
+            drop(tx);
+            let message_stream = MessageStream::new(rx).aggregate_continuations();
+            let mut stream = std::pin::pin!(message_stream);
+
+            let poll = stream.as_mut().poll_next(cx);
+            assert!(
+                matches!(poll, Poll::Ready(None)),
+                "Stream should be ready when all continuations have been sent"
+            );
+
+            Poll::Ready(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn continuation_overflow_errors_once_and_recovers() {
+        std::future::poll_fn(move |cx| {
+            let (mut tx, rx) = payload_pair(8);
+            let message_stream = MessageStream::new(rx)
+                .aggregate_continuations()
+                .max_continuation_size(4);
+            let mut stream = std::pin::pin!(message_stream);
+
+            let poll = stream.as_mut().poll_next(cx);
+            assert!(
+                poll.is_pending(),
+                "Stream should be pending when no messages are present {poll:?}"
+            );
+
+            let messages = vec![
+                Message::Continuation(Item::FirstText(Bytes::from(b"1234".to_vec()))),
+                Message::Continuation(Item::Continue(Bytes::from(b"5".to_vec()))),
+                Message::Ping(Bytes::from(b"p".to_vec())),
+                Message::Continuation(Item::Last(Bytes::from(b"6".to_vec()))),
+                Message::Text("ok".into()),
+            ];
+
+            {
+                let fut = tx.send_many(messages);
+                let fut = std::pin::pin!(fut);
+                assert!(fut.poll(cx).is_ready(), "Sending should not yield");
+            }
+
+            assert!(
+                matches!(stream.as_mut().poll_next(cx), Poll::Ready(Some(Err(_)))),
+                "expected one overflow error"
+            );
+
+            assert!(
+                matches!(
+                    stream.as_mut().poll_next(cx),
+                    Poll::Ready(Some(Ok(AggregatedMessage::Ping(_))))
+                ),
+                "expected ping frame after overflow"
+            );
+
+            assert!(
+                matches!(
+                    stream.as_mut().poll_next(cx),
+                    Poll::Ready(Some(Ok(AggregatedMessage::Text(text)))) if &text[..] == "ok"
+                ),
+                "expected text message after overflow continuation is terminated"
+            );
+
+            assert!(
+                stream.as_mut().poll_next(cx).is_pending(),
+                "Stream should be pending after processing messages"
+            );
+
+            Poll::Ready(())
+        })
+        .await
+    }
 }

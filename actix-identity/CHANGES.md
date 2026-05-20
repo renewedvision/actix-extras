@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Minimum supported Rust version (MSRV) is now 1.88.
+
+## 0.9.0
+
+- Fix spelling of `config::LogoutBehavior` type.
+- Fix spelling of `config::IdentityMiddlewareBuilder::logout_behavior()` method.
+- Update `actix-session` dependency to `0.11`.
+- Minimum supported Rust version (MSRV) is now 1.80.
+
+## 0.8.0
+
 - Update `actix-session` dependency to `0.10`.
 
 ## 0.7.1

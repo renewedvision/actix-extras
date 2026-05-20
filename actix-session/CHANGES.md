@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- Session state is now stored as JSON values rather than JSON strings, avoiding double serialization in storage backends.
+  The stored session-state format is versioned and older sessions are automatically migrated when loaded.
+- Add `Session::new()` and `Default` implementation for creating standalone empty sessions in tests.
+- `Session` implementation of `FromRequest` now errors with `Infallible` rather than `actix_web::error::Error`.
+- Minimum supported Rust version (MSRV) is now 1.88.
+- Update `redis` dependency to `1`.
+- Update optional `deadpool-redis` dependency to `0.23`.
+
+## 0.11.0
+
+- Add `Session::contains_key` method.
+- Add `Session::update[_or]()` methods.
+- Update `redis` dependency to `0.32`.
+- Minimum supported Rust version (MSRV) is now 1.80.
+
+## 0.10.1
+
+- Expose `storage::generate_session_key()` without needing to enable a crate feature.
+
 ## 0.10.0
 
 - Add `redis-session-rustls` crate feature that enables `rustls`-secured Redis sessions.

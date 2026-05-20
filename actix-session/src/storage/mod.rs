@@ -2,21 +2,20 @@
 
 #[cfg(feature = "cookie-session")]
 mod cookie;
+#[cfg(any(feature = "cookie-session", feature = "redis-session", test))]
+mod format;
 mod interface;
 #[cfg(feature = "redis-session")]
 mod redis_rs;
 mod session_key;
-#[cfg(feature = "redis-session")]
 mod utils;
 
 #[cfg(feature = "cookie-session")]
 pub use self::cookie::CookieSessionStore;
+#[cfg(feature = "redis-session")]
+pub use self::redis_rs::{RedisSessionStore, RedisSessionStoreBuilder};
 pub use self::{
     interface::{LoadError, SaveError, SessionStore, UpdateError},
     session_key::SessionKey,
-};
-#[cfg(feature = "redis-session")]
-pub use self::{
-    redis_rs::{RedisSessionStore, RedisSessionStoreBuilder},
     utils::generate_session_key,
 };

@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.4.0
+
+- feat: Add `handle_with_protocols()` for `Sec-WebSocket-Protocol` negotiation [#479]
+- feat: Add optional typed message codecs with serde_json support.
+- feat: Implement `Sink<Message>` for `Session`
+- fix: Ignore empty continuation chunks [#660]
+- fix: Truncate oversized control-frame payloads to avoid emitting invalid frames [#508]
+- fix: Fix continuation overflow handling
+- fix: Ensure `MessageStream` terminates on abrupt disconnects even if payload stalls (e.g. `wss`) [#672]
+
+[#479]: https://github.com/actix/actix-extras/issues/479
+[#660]: https://github.com/actix/actix-extras/pull/660
+[#508]: https://github.com/actix/actix-extras/issues/508
+[#672]: https://github.com/actix/actix-extras/issues/672
+
+## 0.3.1
+
+- enable actix-web's `ws` feature explicitly.
+- Ensure TCP connection is properly shut down when session is dropped.
+
 ## 0.3.0
 
 - Add `AggregatedMessage[Stream]` types.

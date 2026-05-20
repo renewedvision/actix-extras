@@ -5,9 +5,9 @@
 <!-- prettier-ignore-start -->
 
 [![crates.io](https://img.shields.io/crates/v/actix-settings?label=latest)](https://crates.io/crates/actix-settings)
-[![Documentation](https://docs.rs/actix-settings/badge.svg?version=0.8.0)](https://docs.rs/actix-settings/0.8.0)
+[![Documentation](https://docs.rs/actix-settings/badge.svg?version=0.9.0)](https://docs.rs/actix-settings/0.9.0)
 ![Apache 2.0 or MIT licensed](https://img.shields.io/crates/l/actix-settings)
-[![Dependency Status](https://deps.rs/crate/actix-settings/0.8.0/status.svg)](https://deps.rs/crate/actix-settings/0.8.0)
+[![Dependency Status](https://deps.rs/crate/actix-settings/0.9.0/status.svg)](https://deps.rs/crate/actix-settings/0.9.0)
 
 <!-- prettier-ignore-end -->
 
@@ -27,5 +27,5 @@ Have a look at [the usage example][usage] to see how.
 
 This crate was made possible by support from Accept B.V and [@jjpe].
 
-[usage]: https://github.com/actix/actix-extras/blob/master/actix-settings/examples/actix.rs
+[usage]: https://github.com/actix/actix-extras/blob/main/actix-settings/examples/actix.rs
 [@jjpe]: https://github.com/jjpe

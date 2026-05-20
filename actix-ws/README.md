@@ -5,11 +5,11 @@
 <!-- prettier-ignore-start -->
 
 [![crates.io](https://img.shields.io/crates/v/actix-ws?label=latest)](https://crates.io/crates/actix-ws)
-[![Documentation](https://docs.rs/actix-ws/badge.svg?version=0.3.0)](https://docs.rs/actix-ws/0.3.0)
-![Version](https://img.shields.io/badge/rustc-1.75+-ab6000.svg)
+[![Documentation](https://docs.rs/actix-ws/badge.svg?version=0.4.0)](https://docs.rs/actix-ws/0.4.0)
+![Version](https://img.shields.io/badge/rustc-1.88+-ab6000.svg)
 ![MIT or Apache 2.0 licensed](https://img.shields.io/crates/l/actix-ws.svg)
 <br />
-[![Dependency Status](https://deps.rs/crate/actix-ws/0.3.0/status.svg)](https://deps.rs/crate/actix-ws/0.3.0)
+[![Dependency Status](https://deps.rs/crate/actix-ws/0.4.0/status.svg)](https://deps.rs/crate/actix-ws/0.4.0)
 [![Download](https://img.shields.io/crates/d/actix-ws.svg)](https://crates.io/crates/actix-ws)
 [![Chat on Discord](https://img.shields.io/discord/771444961383153695?label=chat&logo=discord)](https://discord.gg/NWpN5mmg3x)
 
@@ -25,7 +25,7 @@ async fn ws(req: HttpRequest, body: web::Payload) -> actix_web::Result<impl Resp
     let (response, mut session, mut msg_stream) = actix_ws::handle(&req, body)?;
 
     actix_web::rt::spawn(async move {
-        while let Some(Ok(msg)) = msg_stream.next().await {
+        while let Some(Ok(msg)) = msg_stream.recv().await {
             match msg {
                 Message::Ping(bytes) => {
                     if session.pong(&bytes).await.is_err() {
@@ -58,11 +58,37 @@ async fn main() -> std::io::Result<()> {
 }
 ```
 
+## Typed Messages (Optional)
+
+Enable the `serde-json` feature to send/receive typed messages using `serde_json`.
+
+See `examples/json.rs` and run it with:
+
+```sh
+cargo run -p actix-ws --features serde-json --example json
+```
+
+## WebSocket Sub-Protocols
+
+Use `handle_with_protocols` when your server supports one or more
+`Sec-WebSocket-Protocol` values.
+
+```rust
+let (response, session, msg_stream) = actix_ws::handle_with_protocols(
+    &req,
+    body,
+    &["graphql-transport-ws", "graphql-ws"],
+)?;
+```
+
+When there is an overlap, the first protocol offered by the client that the server supports is
+returned in the handshake response.
+
 ## Resources
 
 - [API Documentation](https://docs.rs/actix-ws)
-- [Example Chat Project](https://github.com/actix/examples/tree/master/websockets/chat-actorless)
-- Minimum Supported Rust Version (MSRV): 1.75
+- [Example Chat Project](https://github.com/actix/examples/tree/main/websockets/chat-actorless)
+- Minimum Supported Rust Version (MSRV): 1.88
 
 ## License
 

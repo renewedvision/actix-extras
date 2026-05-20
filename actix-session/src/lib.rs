@@ -133,7 +133,7 @@
 #![warn(missing_docs)]
 #![doc(html_logo_url = "https://actix.rs/img/logo.png")]
 #![doc(html_favicon_url = "https://actix.rs/favicon.ico")]
-#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub mod config;
 mod middleware;
@@ -148,6 +148,7 @@ pub use self::{
 };
 
 #[cfg(test)]
+#[allow(missing_docs)]
 pub mod test_helpers {
     use actix_web::cookie::Key;
 
@@ -233,7 +234,7 @@ pub mod test_helpers {
                             .build(),
                     )
                     .service(web::resource("/").to(|ses: Session| async move {
-                        let _ = ses.insert("counter", 100);
+                        ses.insert("counter", 100).unwrap();
                         "test"
                     }))
                     .service(web::resource("/test/").to(|ses: Session| async move {
@@ -281,7 +282,7 @@ pub mod test_helpers {
                             .build(),
                     )
                     .service(web::resource("/").to(|ses: Session| async move {
-                        let _ = ses.insert("counter", 100);
+                        ses.insert("counter", 100).unwrap();
                         "test"
                     }))
                     .service(web::resource("/test/").to(|| async move { "no-changes-in-session" })),
@@ -323,7 +324,7 @@ pub mod test_helpers {
                             .build(),
                     )
                     .service(web::resource("/").to(|ses: Session| async move {
-                        let _ = ses.insert("counter", 100);
+                        ses.insert("counter", 100).unwrap();
                         "test"
                     }))
                     .service(web::resource("/test/").to(|| async move { "no-changes-in-session" })),
@@ -688,7 +689,7 @@ pub mod test_helpers {
 
         async fn login(user_id: web::Json<Identity>, session: Session) -> Result<HttpResponse> {
             let id = user_id.into_inner().user_id;
-            session.insert("user_id", &id)?;
+            session.insert("user_id", id.clone())?;
             session.renew();
 
             let counter: i32 = session

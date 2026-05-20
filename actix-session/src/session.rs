@@ -1,6 +1,6 @@
 use std::{
     cell::{Ref, RefCell},
-    collections::HashMap,
+    convert::Infallible,
     error::Error as StdError,
     mem,
     rc::Rc,
@@ -10,12 +10,12 @@ use actix_utils::future::{ready, Ready};
 use actix_web::{
     body::BoxBody,
     dev::{Extensions, Payload, ServiceRequest, ServiceResponse},
-    error::Error,
     FromRequest, HttpMessage, HttpRequest, HttpResponse, ResponseError,
 };
 use anyhow::Context;
 use derive_more::derive::{Display, From};
 use serde::{de::DeserializeOwned, Serialize};
+use serde_json::{Map, Value};
 
 /// The primary interface to access and modify session state.
 ///
@@ -33,6 +33,9 @@ use serde::{de::DeserializeOwned, Serialize};
 ///         session.insert("counter", 1)?;
 ///     }
 ///
+///     // or use the shorthand
+///     session.update_or("counter", 1, |count: i32| count + 1);
+///
 ///     Ok("Welcome!")
 /// }
 /// # actix_web::web::to(index);
@@ -40,6 +43,9 @@ use serde::{de::DeserializeOwned, Serialize};
 ///
 /// You can also retrieve a [`Session`] object from an `HttpRequest` or a `ServiceRequest` using
 /// [`SessionExt`].
+///
+/// For tests outside of request handling, use [`Session::new`] to create a standalone empty
+/// session.
 ///
 /// [`SessionExt`]: crate::SessionExt
 #[derive(Clone)]
@@ -70,18 +76,29 @@ pub enum SessionStatus {
 
 #[derive(Default)]
 struct SessionInner {
-    state: HashMap<String, String>,
+    state: Map<String, Value>,
     status: SessionStatus,
 }
 
 impl Session {
+    /// Creates a standalone empty [`Session`].
+    ///
+    /// This is useful for testing code that accepts a [`Session`] directly. Sessions created using
+    /// this constructor are not attached to an Actix Web request, so their state will not be
+    /// persisted by [`SessionMiddleware`].
+    ///
+    /// [`SessionMiddleware`]: crate::SessionMiddleware
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// Get a `value` from the session.
     ///
     /// It returns an error if it fails to deserialize as `T` the JSON value associated with `key`.
     pub fn get<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>, SessionGetError> {
-        if let Some(val_str) = self.0.borrow().state.get(key) {
+        if let Some(value) = self.0.borrow().state.get(key) {
             Ok(Some(
-                serde_json::from_str(val_str)
+                serde_json::from_value::<T>(value.clone())
                     .with_context(|| {
                         format!(
                             "Failed to deserialize the JSON-encoded session data attached to key \
@@ -97,10 +114,15 @@ impl Session {
         }
     }
 
+    /// Returns `true` if the session contains a value for the specified `key`.
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.0.borrow().state.contains_key(key)
+    }
+
     /// Get all raw key-value data from the session.
     ///
-    /// Note that values are JSON encoded.
-    pub fn entries(&self) -> Ref<'_, HashMap<String, String>> {
+    /// Note that values are JSON values.
+    pub fn entries(&self) -> Ref<'_, Map<String, Value>> {
         Ref::map(self.0.borrow(), |inner| &inner.state)
     }
 
@@ -114,7 +136,9 @@ impl Session {
     /// Any serializable value can be used and will be encoded as JSON in session data, hence why
     /// only a reference to the value is taken.
     ///
-    /// It returns an error if it fails to serialize `value` to JSON.
+    /// # Errors
+    ///
+    /// Returns an error if JSON serialization of `value` fails.
     pub fn insert<T: Serialize>(
         &self,
         key: impl Into<String>,
@@ -128,13 +152,12 @@ impl Session {
             }
 
             let key = key.into();
-            let val = serde_json::to_string(&value)
+            let val = serde_json::to_value(&value)
                 .with_context(|| {
                     format!(
                         "Failed to serialize the provided `{}` type instance as JSON in order to \
-                        attach as session data to the `{}` key",
+                        attach as session data to the `{key}` key",
                         std::any::type_name::<T>(),
-                        &key
                     )
                 })
                 .map_err(SessionInsertError)?;
@@ -145,10 +168,87 @@ impl Session {
         Ok(())
     }
 
+    /// Updates a key-value pair into the session.
+    ///
+    /// If the key exists then update it to the new value and place it back in. If the key does not
+    /// exist it will not be updated.
+    ///
+    /// Any serializable value can be used and will be encoded as JSON in the session data, hence
+    /// why only a reference to the value is taken.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if JSON serialization of the value fails.
+    pub fn update<T: Serialize + DeserializeOwned, F>(
+        &self,
+        key: impl Into<String>,
+        updater: F,
+    ) -> Result<(), SessionUpdateError>
+    where
+        F: FnOnce(T) -> T,
+    {
+        let mut inner = self.0.borrow_mut();
+        let key_str = key.into();
+
+        if let Some(val) = inner.state.get(&key_str) {
+            let value = serde_json::from_value(val.clone())
+                .with_context(|| {
+                    format!(
+                        "Failed to deserialize the JSON-encoded session data attached to key \
+                        `{key_str}` as a `{}` type",
+                        std::any::type_name::<T>()
+                    )
+                })
+                .map_err(SessionUpdateError)?;
+
+            let val = serde_json::to_value(updater(value))
+                .with_context(|| {
+                    format!(
+                        "Failed to serialize the provided `{}` type instance as JSON in order to \
+                        attach as session data to the `{key_str}` key",
+                        std::any::type_name::<T>(),
+                    )
+                })
+                .map_err(SessionUpdateError)?;
+
+            inner.state.insert(key_str, val);
+        }
+
+        Ok(())
+    }
+
+    /// Updates a key-value pair into the session, or inserts a default value.
+    ///
+    /// If the key exists then update it to the new value and place it back in. If the key does not
+    /// exist the default value will be inserted instead.
+    ///
+    /// Any serializable value can be used and will be encoded as JSON in session data, hence why
+    /// only a reference to the value is taken.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if JSON serialization of a value fails.
+    pub fn update_or<T: Serialize + DeserializeOwned, F>(
+        &self,
+        key: &str,
+        default_value: T,
+        updater: F,
+    ) -> Result<(), SessionUpdateError>
+    where
+        F: FnOnce(T) -> T,
+    {
+        if self.contains_key(key) {
+            self.update(key, updater)
+        } else {
+            self.insert(key, default_value)
+                .map_err(|err| SessionUpdateError(err.into()))
+        }
+    }
+
     /// Remove value from the session.
     ///
-    /// If present, the JSON encoded value is returned.
-    pub fn remove(&self, key: &str) -> Option<String> {
+    /// If present, the JSON value is returned.
+    pub fn remove(&self, key: &str) -> Option<Value> {
         let mut inner = self.0.borrow_mut();
 
         if inner.status != SessionStatus::Purged {
@@ -164,10 +264,10 @@ impl Session {
     /// Remove value from the session and deserialize.
     ///
     /// Returns `None` if key was not present in session. Returns `T` if deserialization succeeds,
-    /// otherwise returns un-deserialized JSON string.
-    pub fn remove_as<T: DeserializeOwned>(&self, key: &str) -> Option<Result<T, String>> {
+    /// otherwise returns the raw JSON value.
+    pub fn remove_as<T: DeserializeOwned>(&self, key: &str) -> Option<Result<T, Value>> {
         self.remove(key)
-            .map(|val_str| match serde_json::from_str(&val_str) {
+            .map(|value| match serde_json::from_value::<T>(value.clone()) {
                 Ok(val) => Ok(val),
                 Err(_err) => {
                     tracing::debug!(
@@ -176,7 +276,7 @@ impl Session {
                         std::any::type_name::<T>()
                     );
 
-                    Err(val_str)
+                    Err(value)
                 }
             })
     }
@@ -212,11 +312,11 @@ impl Session {
     /// Adds the given key-value pairs to the session on the request.
     ///
     /// Values that match keys already existing on the session will be overwritten. Values should
-    /// already be JSON serialized.
+    /// already be JSON values.
     #[allow(clippy::needless_pass_by_ref_mut)]
     pub(crate) fn set_session(
         req: &mut ServiceRequest,
-        data: impl IntoIterator<Item = (String, String)>,
+        data: impl IntoIterator<Item = (String, Value)>,
     ) {
         let session = Session::get_session(&mut req.extensions_mut());
         let mut inner = session.0.borrow_mut();
@@ -231,7 +331,7 @@ impl Session {
     #[allow(clippy::needless_pass_by_ref_mut)]
     pub(crate) fn get_changes<B>(
         res: &mut ServiceResponse<B>,
-    ) -> (SessionStatus, HashMap<String, String>) {
+    ) -> (SessionStatus, Map<String, Value>) {
         if let Some(s_impl) = res
             .request()
             .extensions()
@@ -240,7 +340,7 @@ impl Session {
             let state = mem::take(&mut s_impl.borrow_mut().state);
             (s_impl.borrow().status.clone(), state)
         } else {
-            (SessionStatus::Unchanged, HashMap::new())
+            (SessionStatus::Unchanged, Map::new())
         }
     }
 
@@ -249,10 +349,16 @@ impl Session {
             return Session(Rc::clone(s_impl));
         }
 
-        let inner = Rc::new(RefCell::new(SessionInner::default()));
-        extensions.insert(inner.clone());
+        let session = Session::default();
+        extensions.insert(Rc::clone(&session.0));
 
-        Session(inner)
+        session
+    }
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Self(Rc::new(RefCell::new(SessionInner::default())))
     }
 }
 
@@ -277,8 +383,8 @@ impl Session {
 /// }
 /// ```
 impl FromRequest for Session {
-    type Error = Error;
-    type Future = Ready<Result<Session, Error>>;
+    type Error = Infallible;
+    type Future = Ready<Result<Session, Self::Error>>;
 
     #[inline]
     fn from_request(req: &HttpRequest, _: &mut Payload) -> Self::Future {
@@ -315,6 +421,23 @@ impl StdError for SessionInsertError {
 }
 
 impl ResponseError for SessionInsertError {
+    fn error_response(&self) -> HttpResponse<BoxBody> {
+        HttpResponse::new(self.status_code())
+    }
+}
+
+/// Error returned by [`Session::update`].
+#[derive(Debug, Display, From)]
+#[display("{_0}")]
+pub struct SessionUpdateError(anyhow::Error);
+
+impl StdError for SessionUpdateError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
+
+impl ResponseError for SessionUpdateError {
     fn error_response(&self) -> HttpResponse<BoxBody> {
         HttpResponse::new(self.status_code())
     }

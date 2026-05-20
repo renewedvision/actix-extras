@@ -2,10 +2,14 @@ use std::sync::Arc;
 
 use actix_web::cookie::time::Duration;
 use anyhow::Error;
-use redis::{aio::ConnectionManager, AsyncCommands, Client, Cmd, FromRedisValue, Value};
+use redis::{
+    aio::{ConnectionManager, ConnectionManagerConfig},
+    AsyncCommands, Client, Cmd, FromRedisValue, Value,
+};
 
 use super::SessionKey;
 use crate::storage::{
+    format::{deserialize_session_state, serialize_session_state},
     interface::{LoadError, SaveError, SessionState, UpdateError},
     utils::generate_session_key,
     SessionStore,
@@ -44,7 +48,7 @@ use crate::storage::{
 /// ```
 ///
 /// # TLS support
-/// Add the `redis-rs-tls-session` or `redis-rs-tls-session-rustls` feature flag to enable TLS support. You can then establish a TLS
+/// Add the `redis-session-native-tls` or `redis-session-rustls` feature flag to enable TLS support. You can then establish a TLS
 /// connection to Redis using the `rediss://` URL scheme:
 ///
 /// ```no_run
@@ -168,7 +172,14 @@ impl RedisSessionConnBuilder {
     async fn into_client(self) -> anyhow::Result<RedisSessionConn> {
         Ok(match self {
             RedisSessionConnBuilder::Single(conn_string) => {
-                RedisSessionConn::Single(ConnectionManager::new(Client::open(conn_string)?).await?)
+                // Keep pre-redis@1 behavior for actix-session by opting out of the new default
+                // async connection and response timeouts.
+                let config = ConnectionManagerConfig::new()
+                    .set_connection_timeout(None)
+                    .set_response_timeout(None);
+                let conn =
+                    ConnectionManager::new_with_config(Client::open(conn_string)?, config).await?;
+                RedisSessionConn::Single(conn)
             }
 
             #[cfg(feature = "redis-pool")]
@@ -205,14 +216,13 @@ impl SessionStore for RedisSessionStore {
         let value: Option<String> = self
             .execute_command(redis::cmd("GET").arg(&[&cache_key]))
             .await
-            .map_err(Into::into)
             .map_err(LoadError::Other)?;
 
         match value {
             None => Ok(None),
-            Some(value) => Ok(serde_json::from_str(&value)
-                .map_err(Into::into)
-                .map_err(LoadError::Deserialization)?),
+            Some(value) => Ok(Some(
+                deserialize_session_state(&value).map_err(LoadError::Deserialization)?,
+            )),
         }
     }
 
@@ -221,9 +231,7 @@ impl SessionStore for RedisSessionStore {
         session_state: SessionState,
         ttl: &Duration,
     ) -> Result<SessionKey, SaveError> {
-        let body = serde_json::to_string(&session_state)
-            .map_err(Into::into)
-            .map_err(SaveError::Serialization)?;
+        let body = serialize_session_state(&session_state).map_err(SaveError::Serialization)?;
         let session_key = generate_session_key();
         let cache_key = (self.configuration.cache_keygen)(session_key.as_ref());
 
@@ -240,7 +248,6 @@ impl SessionStore for RedisSessionStore {
                 ),
         )
         .await
-        .map_err(Into::into)
         .map_err(SaveError::Other)?;
 
         Ok(session_key)
@@ -252,9 +259,7 @@ impl SessionStore for RedisSessionStore {
         session_state: SessionState,
         ttl: &Duration,
     ) -> Result<SessionKey, UpdateError> {
-        let body = serde_json::to_string(&session_state)
-            .map_err(Into::into)
-            .map_err(UpdateError::Serialization)?;
+        let body = serialize_session_state(&session_state).map_err(UpdateError::Serialization)?;
 
         let cache_key = (self.configuration.cache_keygen)(session_key.as_ref());
 
@@ -267,7 +272,6 @@ impl SessionStore for RedisSessionStore {
                 &format!("{}", ttl.whole_seconds()),
             ]))
             .await
-            .map_err(Into::into)
             .map_err(UpdateError::Other)?;
 
         match v {
@@ -318,7 +322,6 @@ impl SessionStore for RedisSessionStore {
 
         self.execute_command::<()>(redis::cmd("DEL").arg(&[&cache_key]))
             .await
-            .map_err(Into::into)
             .map_err(UpdateError::Other)?;
 
         Ok(())
@@ -398,11 +401,11 @@ impl RedisSessionStore {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use actix_web::cookie::time;
     #[cfg(not(feature = "redis-session"))]
     use deadpool_redis::{Config, Runtime};
+    use redis::AsyncCommands;
+    use serde_json::Map;
 
     use super::*;
     use crate::test_helpers::acceptance_test_suite;
@@ -472,7 +475,7 @@ mod tests {
         let session_key = generate_session_key();
         let initial_session_key = session_key.as_ref().to_owned();
         let updated_session_key = store
-            .update(session_key, HashMap::new(), &time::Duration::seconds(1))
+            .update(session_key, Map::new(), &time::Duration::seconds(1))
             .await
             .unwrap();
         assert_ne!(initial_session_key, updated_session_key.as_ref());

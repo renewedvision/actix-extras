@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 #![doc(html_logo_url = "https://actix.rs/img/logo.png")]
 #![doc(html_favicon_url = "https://actix.rs/favicon.ico")]
-#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 use std::{
     fmt,
@@ -143,8 +143,8 @@ where
         ProtoBufMessage::new(req, payload)
             .limit(limit)
             .map(move |res| match res {
-                Err(e) => Err(e.into()),
                 Ok(item) => Ok(ProtoBuf(item)),
+                Err(err) => Err(err.into()),
             })
             .boxed_local()
     }

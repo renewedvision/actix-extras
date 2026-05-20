@@ -5,9 +5,9 @@
 <!-- prettier-ignore-start -->
 
 [![crates.io](https://img.shields.io/crates/v/actix-identity?label=latest)](https://crates.io/crates/actix-identity)
-[![Documentation](https://docs.rs/actix-identity/badge.svg?version=0.7.1)](https://docs.rs/actix-identity/0.7.1)
+[![Documentation](https://docs.rs/actix-identity/badge.svg?version=0.9.0)](https://docs.rs/actix-identity/0.9.0)
 ![Apache 2.0 or MIT licensed](https://img.shields.io/crates/l/actix-identity)
-[![Dependency Status](https://deps.rs/crate/actix-identity/0.7.1/status.svg)](https://deps.rs/crate/actix-identity/0.7.1)
+[![Dependency Status](https://deps.rs/crate/actix-identity/0.9.0/status.svg)](https://deps.rs/crate/actix-identity/0.9.0)
 
 <!-- prettier-ignore-end -->
 
@@ -83,15 +83,17 @@ async fn login(request: HttpRequest) -> impl Responder {
 }
 
 #[post("/logout")]
-async fn logout(user: Identity) -> impl Responder {
-    user.logout();
+async fn logout(user: Option<Identity>) -> impl Responder {
+    if let Some(user) = user {
+        user.logout();
+    }
     HttpResponse::Ok()
 }
 ```
 
 ## Advanced configuration
 
-By default, `actix-identity` does not automatically log out users. You can change this behaviour by customising the configuration for [`IdentityMiddleware`] via [`IdentityMiddleware::builder`].
+By default, `actix-identity` does not automatically log out users. You can change this behavior by customizing the configuration for [`IdentityMiddleware`] via [`IdentityMiddleware::builder`].
 
 In particular, you can automatically log out users who:
 
